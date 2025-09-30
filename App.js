@@ -186,10 +186,10 @@ export default function App() {
           </TouchableOpacity>
 
           <TouchableOpacity
-            style={[styles.button, styles.secondaryButton]}
+            style={[styles.button, styles.instagramButton]}
             onPress={() => setShowUrlInput(true)}
           >
-            <Text style={styles.buttonText}>📱 Instagram URL ile Dene (Beta)</Text>
+            <Text style={styles.buttonText}>📱 Instagram İndirici</Text>
           </TouchableOpacity>
 
           {processedVideo && (

@@ -9,14 +9,22 @@ import {
   Alert,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
+import * as FileSystem from 'expo-file-system';
 import instagramDownloader from '../services/instagramDownloader';
+import { getSimpleInjectionScript } from '../services/instagramDownloaderSimple';
+import { getMediaSourceCaptureScript } from '../services/instagramMediaSourceCapture';
 
 export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
   const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState({ stage: '', message: '', progress: 0 });
   const [loadWebView, setLoadWebView] = useState(false);
+  const [webViewProgress, setWebViewProgress] = useState(0);
+  const [videoQuality, setVideoQuality] = useState('720p'); // 720p, 1080p, original
+  const [capturedVideoData, setCapturedVideoData] = useState(null);
   const webViewRef = useRef(null);
+  const blobChunksRef = useRef([]);
+  const blobMetadataRef = useRef(null);
 
   const handleDownload = async () => {
     if (!url.trim()) {
@@ -25,61 +33,40 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
     }
 
     if (!instagramDownloader.isInstagramUrl(url)) {
-      Alert.alert('Hata', 'Geçerli bir Instagram URL\'si girin\n\nÖrnekler:\n- instagram.com/reel/...\n- instagram.com/p/...');
+      Alert.alert('Hata', 'Geçerli bir Instagram URL\'si girin\n\nÖrnekler:\n- instagram.com/reel/...\n- instagram.com/p/...\n- instagram.com/username');
       return;
     }
 
-    setLoading(true);
-    setProgress({ stage: 'loading', message: 'Video URL alınıyor...', progress: 0 });
+    const urlType = instagramDownloader.getUrlType(url);
 
-    try {
-      let videoUrl = null;
+    // Profil fotoğrafı için direkt indirme
+    if (urlType === 'profile') {
+      setLoading(true);
+      setProgress({ stage: 'loading', message: 'Profil fotoğrafı indiriliyor...', progress: 0 });
 
-      // Method 1: shaon-videos-downloader (öncelikli)
       try {
-        console.log('📦 Trying shaon-videos-downloader...');
-        videoUrl = await instagramDownloader.getVideoUrlWithShaon(url);
-      } catch (shaonError) {
-        console.log('⚠️ Shaon failed, trying HTML scraping...', shaonError.message);
-
-        // Method 2: HTML scraping (yedek)
-        try {
-          videoUrl = await instagramDownloader.getVideoUrlFromJson(url);
-        } catch (htmlError) {
-          console.log('⚠️ HTML scraping also failed:', htmlError.message);
-          throw new Error('Video URL alınamadı');
-        }
-      }
-
-      if (videoUrl) {
-        console.log('✅ Got video URL, downloading...');
-        setProgress({ stage: 'downloading', message: 'Video indiriliyor...', progress: 0 });
-
-        const result = await instagramDownloader.downloadVideo(url, videoUrl, (progressData) => {
+        const result = await instagramDownloader.downloadProfilePhoto(url, (progressData) => {
           setProgress(progressData);
         });
 
         setLoading(false);
-        Alert.alert('Başarılı', 'Video indirildi!', [
+        Alert.alert('Başarılı', `Profil fotoğrafı indirildi!\n\nKullanıcı: @${result.username}`, [
           {
             text: 'Tamam',
             onPress: () => onVideoDownloaded(result.uri),
           },
         ]);
+      } catch (error) {
+        setLoading(false);
+        Alert.alert('Hata', 'Profil fotoğrafı indirilemedi. Hesap özel olabilir.');
       }
-
-    } catch (error) {
-      setLoading(false);
-      console.error('❌ Download error:', error);
-      Alert.alert(
-        'İndirme Başarısız',
-        'Instagram koruması nedeniyle video indirilemedi.\n\nAlternatif: Videoyu SaveFrom.net veya SnapInsta gibi sitelerden indirip "Galeriden Seç" ile yükleyin.',
-        [
-          { text: 'Tamam' },
-          { text: 'Ana Ekrana Dön', onPress: onBack },
-        ]
-      );
+      return;
     }
+
+    // Video için WebView kullan
+    setLoading(true);
+    setLoadWebView(true);
+    setProgress({ stage: 'loading', message: 'Video yükleniyor...', progress: 0 });
   };
 
   const handleWebViewMessage = async (event) => {
@@ -89,12 +76,16 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
 
       if (data.type === 'DEBUG') {
         console.log('🔍 DEBUG:', data.message);
+        // DEBUG mesajlarını UI'da göster
+        setProgress({ stage: 'loading', message: data.message, progress: 0 });
         return;
       }
 
       if (data.type === 'VIDEO_FOUND') {
         console.log('✅ Video URL found via', data.method + ':', data.url);
 
+        // WebView'ı gizle
+        setLoadWebView(false);
         setProgress({ stage: 'downloading', message: 'Video indiriliyor...', progress: 0 });
 
         // Video URL'i ile indirmeye devam et
@@ -102,7 +93,6 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
           setProgress(progressData);
         });
 
-        setLoadWebView(false);
         setLoading(false);
 
         Alert.alert('Başarılı', 'Video indirildi!', [
@@ -112,7 +102,81 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
           },
         ]);
 
+      } else if (data.type === 'BLOB_START') {
+        console.log('📦 Video parçaları geliyor:', data.totalChunks, 'parça');
+        blobChunksRef.current = [];
+        blobMetadataRef.current = {
+          totalChunks: data.totalChunks,
+          size: data.size,
+          mimeType: data.mimeType,
+          resolution: data.resolution
+        };
+
+        setProgress({
+          stage: 'loading',
+          message: `Video indiriliyor... (0/${data.totalChunks})`,
+          progress: 0
+        });
+
+      } else if (data.type === 'BLOB_CHUNK') {
+        blobChunksRef.current[data.chunkIndex] = data.data;
+        const progress = Math.round(((data.chunkIndex + 1) / data.totalChunks) * 100);
+
+        console.log(`📥 Parça ${data.chunkIndex + 1}/${data.totalChunks} alındı`);
+
+        setProgress({
+          stage: 'loading',
+          message: `Video indiriliyor... (${data.chunkIndex + 1}/${data.totalChunks})`,
+          progress: progress
+        });
+
+      } else if (data.type === 'BLOB_END') {
+        console.log('✅ Tüm parçalar alındı, birleştiriliyor...');
+
+        // Tüm chunk'ları birleştir
+        const fullBase64 = blobChunksRef.current.join('');
+        const metadata = blobMetadataRef.current;
+
+        console.log('✅ Video yakalandı:', (metadata.size / 1024 / 1024).toFixed(2), 'MB, çözünürlük:', metadata.resolution);
+
+        // Video data'sını kaydet ve download butonu göster
+        setCapturedVideoData({
+          data: fullBase64,
+          size: metadata.size,
+          resolution: metadata.resolution,
+          type: metadata.mimeType
+        });
+
+        setProgress({
+          stage: 'captured',
+          message: `Video yakalandı! ${(metadata.size / 1024 / 1024).toFixed(2)} MB (${metadata.resolution})`,
+          progress: 100
+        });
+
+        // Temizle
+        blobChunksRef.current = [];
+        blobMetadataRef.current = null;
+
+      } else if (data.type === 'BLOB_DATA') {
+        // Eski tek mesaj yöntemi (geriye dönük uyumluluk)
+        const detectedRes = data.resolution || 'unknown';
+        console.log('✅ Video yakalandı:', (data.size / 1024 / 1024).toFixed(2), 'MB, çözünürlük:', detectedRes);
+
+        setCapturedVideoData({
+          data: data.data,
+          size: data.size,
+          resolution: detectedRes,
+          type: data.type
+        });
+
+        setProgress({
+          stage: 'captured',
+          message: `Video yakalandı! ${(data.size / 1024 / 1024).toFixed(2)} MB (${detectedRes})`,
+          progress: 100
+        });
+
       } else if (data.type === 'ERROR') {
+        console.error('❌ WebView error:', data.message);
         throw new Error(data.message);
       }
 
@@ -128,15 +192,18 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
     const { nativeEvent } = syntheticEvent;
     console.error('❌ WebView loading error:', nativeEvent);
 
-    // Instagram deep link redirect'lerini ignore et
-    if (nativeEvent.description && nativeEvent.description.includes('ERR_UNKNOWN_URL_SCHEME')) {
-      console.log('⚠️ Ignoring deep link redirect, continuing...');
+    // Instagram deep link/app store redirect'lerini ignore et
+    if (nativeEvent.description &&
+        (nativeEvent.description.includes('ERR_UNKNOWN_URL_SCHEME') ||
+         nativeEvent.description.includes('itms-apps'))) {
+      console.log('⚠️ Ignoring app redirect, continuing...');
       return;
     }
 
+    // Diğer hatalar için WebView'ı kapat
     setLoadWebView(false);
     setLoading(false);
-    Alert.alert('Hata', 'Instagram sayfası yüklenemedi: ' + nativeEvent.description);
+    Alert.alert('Hata', 'Instagram sayfası yüklenemedi. Lütfen tekrar deneyin.');
   };
 
   const handleWebViewConsole = (event) => {
@@ -144,9 +211,68 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
   };
 
   const handleWebViewLoad = () => {
-    // Sayfa yüklendi, JavaScript inject et
+    console.log('📄 WebView page loaded');
+
+    // MSE capture zaten injectedJavaScriptBeforeContentLoaded ile yüklendi
+    // Fallback script'i de ekle (blob capture için)
     if (webViewRef.current) {
-      webViewRef.current.injectJavaScript(instagramDownloader.getInjectedJavaScript());
+      console.log('💉 Injecting fallback script...');
+      const script = getSimpleInjectionScript();
+      webViewRef.current.injectJavaScript(script);
+      console.log('✅ Fallback script injected');
+    }
+  };
+
+  const handleSaveVideo = async () => {
+    if (!capturedVideoData) return;
+
+    setLoading(true);
+    setProgress({ stage: 'saving', message: 'Video kaydediliyor...', progress: 50 });
+
+    try {
+      // Video tipi WebM ise .webm, değilse .mp4
+      const ext = capturedVideoData.type && capturedVideoData.type.includes('webm') ? 'webm' : 'mp4';
+      const fileName = `instagram_${capturedVideoData.resolution}_${Date.now()}.${ext}`;
+      const fileUri = FileSystem.documentDirectory + fileName;
+
+      console.log('💾 Saving video to:', fileName);
+
+      // data:video/webm;base64,... formatından base64 kısmını çıkar
+      const base64Data = capturedVideoData.data.includes(',')
+        ? capturedVideoData.data.split(',')[1]
+        : capturedVideoData.data;
+
+      // Yeni Expo FileSystem API kullanarak kaydet
+      await FileSystem.writeAsStringAsync(fileUri, base64Data, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      console.log('✅ File saved successfully');
+
+      // Dosya var mı kontrol et
+      const fileInfo = await FileSystem.getInfoAsync(fileUri);
+
+      setLoading(false);
+      setLoadWebView(false);
+      setCapturedVideoData(null);
+      setProgress({ stage: 'completed', message: 'Video kaydedildi!', progress: 100 });
+
+      const format = ext.toUpperCase();
+
+      Alert.alert(
+        'Başarılı',
+        `Video indirildi!\n\nKalite: ${capturedVideoData.resolution}\nBoyut: ${(fileInfo.size / 1024 / 1024).toFixed(2)} MB\nFormat: ${format}`,
+        [
+          {
+            text: 'Tamam',
+            onPress: () => onVideoDownloaded(fileUri),
+          },
+        ]
+      );
+    } catch (saveError) {
+      console.error('❌ Save error:', saveError);
+      setLoading(false);
+      Alert.alert('Hata', 'Video kaydedilemedi: ' + saveError.message);
     }
   };
 
@@ -163,9 +289,9 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
         </TouchableOpacity>
       )}
 
-      <Text style={styles.title}>Instagram URL ile İndirme (Beta)</Text>
+      <Text style={styles.title}>Instagram İçerik İndirici</Text>
       <Text style={styles.subtitle}>
-        Not: Instagram bot koruması nedeniyle çoğu zaman çalışmaz
+        Video, Reel ve Profil Fotoğrafı İndirme
       </Text>
 
       <View style={styles.inputContainer}>
@@ -180,6 +306,42 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
           keyboardType="url"
           editable={!loading}
         />
+      </View>
+
+      {/* Kalite Seçimi */}
+      <View style={styles.qualityContainer}>
+        <Text style={styles.qualityLabel}>Video Kalitesi:</Text>
+        <View style={styles.qualityButtons}>
+          <TouchableOpacity
+            style={[styles.qualityButton, videoQuality === '720p' && styles.qualityButtonActive]}
+            onPress={() => setVideoQuality('720p')}
+          >
+            <Text style={[styles.qualityButtonText, videoQuality === '720p' && styles.qualityButtonTextActive]}>
+              720p
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.qualityButton, videoQuality === '1080p' && styles.qualityButtonActive]}
+            onPress={() => setVideoQuality('1080p')}
+          >
+            <Text style={[styles.qualityButtonText, videoQuality === '1080p' && styles.qualityButtonTextActive]}>
+              1080p
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.qualityButton, videoQuality === 'original' && styles.qualityButtonActive]}
+            onPress={() => setVideoQuality('original')}
+          >
+            <Text style={[styles.qualityButtonText, videoQuality === 'original' && styles.qualityButtonTextActive]}>
+              Orijinal
+            </Text>
+          </TouchableOpacity>
+        </View>
+        <Text style={styles.qualityHint}>
+          {videoQuality === '720p' && '• Orta boyut, iyi kalite (Önerilen)'}
+          {videoQuality === '1080p' && '• Büyük boyut, yüksek kalite'}
+          {videoQuality === 'original' && '• Instagram\'ın sunduğu en yüksek kalite'}
+        </Text>
       </View>
 
       {loading ? (
@@ -203,18 +365,23 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
 
       <View style={styles.examplesContainer}>
         <Text style={styles.examplesTitle}>Desteklenen Linkler:</Text>
-        <Text style={styles.exampleText}>• instagram.com/reel/ABC123...</Text>
-        <Text style={styles.exampleText}>• instagram.com/p/ABC123...</Text>
-        <Text style={styles.exampleText}>• instagram.com/tv/ABC123...</Text>
+        <Text style={styles.exampleText}>• instagram.com/reel/ABC123... (Reels)</Text>
+        <Text style={styles.exampleText}>• instagram.com/p/ABC123... (Posts)</Text>
+        <Text style={styles.exampleText}>• instagram.com/tv/ABC123... (IGTV)</Text>
+        <Text style={styles.exampleText}>• instagram.com/username (Profil Fotoğrafı)</Text>
       </View>
 
       <View style={styles.infoContainer}>
         <Text style={styles.infoTitle}>💡 Nasıl Kullanılır?</Text>
         <Text style={styles.infoText}>
-          1. Instagram'da videoyu açın{'\n'}
+          📹 Video/Reel için:{'\n'}
+          1. Instagram'da içeriği açın{'\n'}
           2. Paylaş → Linki Kopyala{'\n'}
-          3. Buraya yapıştırın{'\n'}
-          4. İndir butonuna tıklayın
+          3. Buraya yapıştırın ve İndir{'\n\n'}
+          📸 Profil Fotoğrafı için:{'\n'}
+          1. Profil sayfasına gidin{'\n'}
+          2. URL'yi kopyalayın{'\n'}
+          3. Buraya yapıştırın ve İndir
         </Text>
       </View>
 
@@ -245,37 +412,112 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
         </TouchableOpacity>
       </View>
 
-      {/* Gizli WebView - Arka planda Instagram embed sayfasını yükler */}
+      {/* Görünür WebView - Instagram sayfasını göster */}
       {loadWebView && (
-        <WebView
-          ref={webViewRef}
-          source={{ uri: `${url.replace(/\/$/, '')}/embed/captioned/` }}
-          style={{ width: 1, height: 1, opacity: 0.01, position: 'absolute', left: -1000 }}
-          onMessage={handleWebViewMessage}
-          onLoad={handleWebViewLoad}
-          onError={handleWebViewError}
-          onHttpError={handleWebViewError}
-          onShouldStartLoadWithRequest={(request) => {
-            // Instagram deep link'leri engelle, sadece http/https'e izin ver
-            if (request.url.startsWith('instagram://')) {
-              console.log('🚫 Blocked Instagram deep link:', request.url);
-              return false;
-            }
-            return true;
-          }}
-          javaScriptEnabled={true}
-          domStorageEnabled={true}
-          mediaPlaybackRequiresUserAction={false}
-          allowsInlineMediaPlayback={true}
-          mixedContentMode="always"
-          thirdPartyCookiesEnabled={true}
-          sharedCookiesEnabled={true}
-          cacheEnabled={false}
-          incognito={false}
-          setSupportMultipleWindows={false}
-          userAgent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
-          originWhitelist={['*']}
-        />
+        <View style={styles.webViewContainer}>
+          <View style={styles.webViewHeader}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.webViewTitle}>
+                {progress.message || 'Instagram Yükleniyor...'}
+              </Text>
+              {webViewProgress > 0 && webViewProgress < 100 && (
+                <View style={styles.webViewProgressBar}>
+                  <View style={[styles.webViewProgressFill, { width: `${webViewProgress}%` }]} />
+                </View>
+              )}
+              {webViewProgress >= 100 && (
+                <View style={styles.instructionContainer}>
+                  {capturedVideoData ? (
+                    <>
+                      <Text style={styles.instructionText}>✅ Video hazır!</Text>
+                      <Text style={styles.instructionSubtext}>
+                        {(capturedVideoData.size / 1024 / 1024).toFixed(2)} MB • {capturedVideoData.resolution}
+                      </Text>
+                      <TouchableOpacity
+                        style={styles.captureDownloadButton}
+                        onPress={handleSaveVideo}
+                      >
+                        <Text style={styles.captureDownloadButtonText}>⬇️ İndir ve Kaydet</Text>
+                      </TouchableOpacity>
+                    </>
+                  ) : progress.stage === 'loading' && (
+                      progress.message.includes('Kaydediliyor') ||
+                      progress.message.includes('Kayıt başladı') ||
+                      progress.message.includes('Chunk')
+                    ) ? (
+                    <>
+                      <Text style={styles.instructionText}>📥 Video kaydediliyor...</Text>
+                      <Text style={styles.instructionSubtext}>{progress.message}</Text>
+                    </>
+                  ) : progress.stage === 'loading' && progress.message.includes('Video süresi') ? (
+                    <>
+                      <Text style={styles.instructionText}>🎬 Video oynatılıyor...</Text>
+                      <Text style={styles.instructionSubtext}>{progress.message}</Text>
+                    </>
+                  ) : (
+                    <>
+                      <Text style={styles.instructionText}>▶️ Videoyu oynatın</Text>
+                      <Text style={styles.instructionSubtext}>Video oynatıldığında otomatik yakalanacak</Text>
+                    </>
+                  )}
+                </View>
+              )}
+            </View>
+            <TouchableOpacity
+              style={styles.webViewCloseButton}
+              onPress={() => {
+                setLoadWebView(false);
+                setLoading(false);
+                setWebViewProgress(0);
+              }}
+            >
+              <Text style={styles.webViewCloseText}>✕</Text>
+            </TouchableOpacity>
+          </View>
+          <WebView
+            ref={webViewRef}
+            source={{ uri: url }}
+            style={styles.webView}
+            injectedJavaScriptBeforeContentLoaded={getMediaSourceCaptureScript()}
+            onMessage={handleWebViewMessage}
+            onLoad={handleWebViewLoad}
+            onLoadProgress={({ nativeEvent }) => setWebViewProgress(nativeEvent.progress * 100)}
+            onError={handleWebViewError}
+            onHttpError={handleWebViewError}
+            onConsoleMessage={(event) => {
+              console.log('🌐 WebView Console:', event.nativeEvent.message);
+            }}
+            onShouldStartLoadWithRequest={(request) => {
+              // Instagram deep link ve app store yönlendirmelerini engelle
+              if (request.url.startsWith('instagram://') ||
+                  request.url.startsWith('itms-appss://') ||
+                  request.url.includes('apps.apple.com') ||
+                  request.url.includes('play.google.com')) {
+                console.log('🚫 Blocked redirect:', request.url.substring(0, 50));
+                return false;
+              }
+              return true;
+            }}
+            javaScriptEnabled={true}
+            domStorageEnabled={true}
+            mediaPlaybackRequiresUserAction={false}
+            allowsInlineMediaPlayback={true}
+            mixedContentMode="always"
+            thirdPartyCookiesEnabled={true}
+            sharedCookiesEnabled={true}
+            cacheEnabled={true}
+            incognito={false}
+            setSupportMultipleWindows={false}
+            userAgent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            originWhitelist={['*']}
+            allowsFullscreenVideo={true}
+          />
+          <View style={styles.webViewFooter}>
+            <Text style={styles.webViewHint}>
+              💡 İpucu: Video tam yüklenene kadar bekleyin, sonra oynatın
+            </Text>
+          </View>
+        </View>
       )}
     </View>
   );
@@ -317,6 +559,47 @@ const styles = StyleSheet.create({
     padding: 15,
     fontSize: 16,
     backgroundColor: '#f9f9f9',
+  },
+  qualityContainer: {
+    marginBottom: 20,
+  },
+  qualityLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 10,
+  },
+  qualityButtons: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  qualityButton: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 15,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#ddd',
+    backgroundColor: '#fff',
+    alignItems: 'center',
+  },
+  qualityButtonActive: {
+    borderColor: '#E1306C',
+    backgroundColor: '#FFE5EE',
+  },
+  qualityButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#666',
+  },
+  qualityButtonTextActive: {
+    color: '#E1306C',
+  },
+  qualityHint: {
+    fontSize: 12,
+    color: '#666',
+    marginTop: 8,
+    fontStyle: 'italic',
   },
   downloadButton: {
     backgroundColor: '#E1306C',
@@ -440,5 +723,106 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 14,
     fontWeight: '600',
+  },
+  webViewContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#fff',
+    zIndex: 1000,
+  },
+  webViewHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    padding: 20,
+    paddingVertical: 25,
+    backgroundColor: '#E1306C',
+    borderBottomWidth: 1,
+    borderBottomColor: '#ddd',
+    minHeight: 100,
+  },
+  webViewTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#fff',
+    marginBottom: 10,
+  },
+  instructionContainer: {
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    padding: 12,
+    borderRadius: 8,
+    marginTop: 8,
+  },
+  instructionText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#fff',
+    marginBottom: 4,
+  },
+  instructionSubtext: {
+    fontSize: 13,
+    color: '#fff',
+    opacity: 0.9,
+    marginBottom: 10,
+  },
+  captureDownloadButton: {
+    backgroundColor: '#fff',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    marginTop: 8,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  captureDownloadButtonText: {
+    color: '#E1306C',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  webViewCloseButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.3)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  webViewCloseText: {
+    fontSize: 20,
+    color: '#fff',
+    fontWeight: 'bold',
+  },
+  webView: {
+    flex: 1,
+  },
+  webViewFooter: {
+    padding: 12,
+    backgroundColor: '#f0f0f0',
+    borderTopWidth: 1,
+    borderTopColor: '#ddd',
+  },
+  webViewHint: {
+    fontSize: 13,
+    color: '#666',
+    textAlign: 'center',
+  },
+  webViewProgressBar: {
+    width: '100%',
+    height: 4,
+    backgroundColor: 'rgba(255,255,255,0.3)',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  webViewProgressFill: {
+    height: '100%',
+    backgroundColor: '#fff',
+    borderRadius: 2,
   },
 });
