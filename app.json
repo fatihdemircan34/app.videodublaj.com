@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "SubtitleApp",
-    "slug": "SubtitleApp",
+    "name": "app.videodublaj.com",
+    "slug": "app.videodublaj.com",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -13,14 +13,37 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.anonymous.app.videodublaj.com",
+      "infoPlist": {
+        "CFBundleDocumentTypes": [
+          {
+            "CFBundleTypeName": "Video",
+            "LSHandlerRank": "Alternate",
+            "LSItemContentTypes": [
+              "public.movie",
+              "public.video"
+            ]
+          }
+        ]
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "package": "com.anonymous.app.videodublaj.com",
+      "intentFilters": [
+        {
+          "action": "SEND",
+          "category": ["DEFAULT"],
+          "data": {
+            "mimeType": "video/*"
+          }
+        }
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
