@@ -4,13 +4,10 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="9b94e65e-089f-4d58-8901-d1bc06c02ebe" name="Changes" comment="degişiklilkler">
+    <list default="true" id="9b94e65e-089f-4d58-8901-d1bc06c02ebe" name="Changes" comment="stabil indirme süper">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app.json" beforeDir="false" afterPath="$PROJECT_DIR$/app.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/package-lock.json" beforeDir="false" afterPath="$PROJECT_DIR$/package-lock.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/package.json" beforeDir="false" afterPath="$PROJECT_DIR$/package.json" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/screens/UrlInputScreen.js" beforeDir="false" afterPath="$PROJECT_DIR$/screens/UrlInputScreen.js" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/services/instagramDownloaderSimple.js" beforeDir="false" afterPath="$PROJECT_DIR$/services/instagramDownloaderSimple.js" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/services/instagramGraphQLCapture.js" beforeDir="false" afterPath="$PROJECT_DIR$/services/instagramGraphQLCapture.js" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -81,7 +78,15 @@
       <option name="project" value="LOCAL" />
       <updated>1759255198087</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="stabil indirme süper">
+      <option name="closed" value="true" />
+      <created>1759296185122</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1759296185122</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -89,6 +94,7 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="degişiklilkler" />
-    <option name="LAST_COMMIT_MESSAGE" value="degişiklilkler" />
+    <MESSAGE value="stabil indirme süper" />
+    <option name="LAST_COMMIT_MESSAGE" value="stabil indirme süper" />
   </component>
 </project>

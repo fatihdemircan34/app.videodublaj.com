@@ -15,6 +15,7 @@ import instagramDownloader from '../services/instagramDownloader';
 import { getSimpleInjectionScript } from '../services/instagramDownloaderSimple';
 import { getMediaSourceCaptureScript } from '../services/instagramMediaSourceCapture';
 import { getInstagramGraphQLCaptureScript } from '../services/instagramGraphQLCapture';
+import { getInstagramEmbedCaptureScript } from '../services/instagramEmbedCapture';
 
 export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
   const [url, setUrl] = useState('');
@@ -67,17 +68,107 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
       return;
     }
 
-    // Video için WebView kullan
+    // Video için - Önce direkt fetch ile dene
     setLoading(true);
-    setLoadWebView(true);
+    setProgress({ stage: 'loading', message: 'Video bilgisi alınıyor...', progress: 0 });
 
-    // Ref'leri sıfırla
-    scriptsInjectedRef.current = false;
-    videoProcessingRef.current = false;
-    blobChunksRef.current = [];
-    blobMetadataRef.current = null;
+    try {
+      // Shortcode çıkar
+      const shortcodeMatch = url.match(/\/(reel|p|tv)\/([^/?]+)/);
+      const shortcode = shortcodeMatch ? shortcodeMatch[2] : null;
 
-    setProgress({ stage: 'loading', message: 'Video yükleniyor...', progress: 0 });
+      if (!shortcode) {
+        throw new Error('Video ID bulunamadı');
+      }
+
+      console.log('🎯 Fetching video for shortcode:', shortcode);
+
+      // Instagram oembed API - login gerektirmiyor!
+      const oembedUrl = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
+
+      console.log('📡 Fetching oembed:', oembedUrl);
+      console.log('📡 Shortcode:', shortcode);
+
+      const response = await fetch(oembedUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        console.log('❌ Direct fetch failed, falling back to WebView');
+        throw new Error('API failed');
+      }
+
+      const data = await response.json();
+      console.log('📦 Got JSON data');
+
+      // Video URL'ini bul
+      let videoUrl = null;
+      let resolution = 'unknown';
+
+      // GraphQL structure
+      if (data.graphql?.shortcode_media?.video_url) {
+        videoUrl = data.graphql.shortcode_media.video_url;
+        resolution = `${data.graphql.shortcode_media.dimensions?.width || 0}x${data.graphql.shortcode_media.dimensions?.height || 0}`;
+      }
+      // items structure
+      else if (data.items?.[0]?.video_versions?.[0]?.url) {
+        videoUrl = data.items[0].video_versions[0].url;
+        const v = data.items[0].video_versions[0];
+        resolution = `${v.width || 0}x${v.height || 0}`;
+      }
+
+      if (!videoUrl) {
+        console.log('❌ Video URL not found in JSON, falling back to WebView');
+        throw new Error('Video URL not found');
+      }
+
+      console.log('✅ Found video URL:', videoUrl.substring(0, 80));
+      console.log('📐 Resolution:', resolution);
+
+      // Video indir
+      setProgress({ stage: 'downloading', message: 'Video indiriliyor...', progress: 10 });
+
+      const videoResponse = await fetch(videoUrl);
+      const blob = await videoResponse.blob();
+
+      console.log('✅ Video fetched:', (blob.size / 1024 / 1024).toFixed(2), 'MB');
+
+      setProgress({ stage: 'converting', message: 'Video işleniyor...', progress: 70 });
+
+      // Blob'u base64'e çevir
+      const reader = new FileReader();
+      reader.onloadend = async function() {
+        const base64Data = reader.result;
+
+        setProgress({ stage: 'saving', message: 'Video kaydediliyor...', progress: 90 });
+
+        // Kaydet
+        await saveVideoToFile({
+          data: base64Data,
+          size: blob.size,
+          resolution: resolution,
+          type: blob.type || 'video/mp4'
+        });
+      };
+      reader.readAsDataURL(blob);
+
+    } catch (error) {
+      console.log('⚠️ Direct fetch failed, trying WebView method:', error.message);
+
+      // WebView fallback
+      setLoadWebView(true);
+
+      // Ref'leri sıfırla
+      scriptsInjectedRef.current = false;
+      videoProcessingRef.current = false;
+      blobChunksRef.current = [];
+      blobMetadataRef.current = null;
+
+      setProgress({ stage: 'loading', message: 'Video yükleniyor (WebView)...', progress: 0 });
+    }
   };
 
   const handleWebViewMessage = async (event) => {
@@ -89,6 +180,56 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
         console.log('🔍 DEBUG:', data.message);
         // DEBUG mesajlarını UI'da göster
         setProgress({ stage: 'loading', message: data.message, progress: 0 });
+        return;
+      }
+
+      // Birden fazla video bulundu - en yüksek kaliteyi otomatik seç
+      if (data.type === 'MULTIPLE_VIDEOS_FOUND') {
+        console.log('🎬 Multiple videos found:', data.count);
+
+        // En yüksek çözünürlüğü seç (zaten sıralı geliyor)
+        const bestVideo = data.videos[0];
+
+        console.log('🎯 Auto-selecting best quality:', bestVideo.width + 'x' + bestVideo.height);
+
+        // WebView'ı kapat
+        setLoadWebView(false);
+        setLoading(true);
+        setProgress({ stage: 'downloading', message: 'Video indiriliyor...', progress: 10 });
+
+        try {
+          console.log('📥 Fetching video from URL...');
+          const response = await fetch(bestVideo.url);
+          const blob = await response.blob();
+
+          console.log('✅ Video fetched:', (blob.size / 1024 / 1024).toFixed(2), 'MB');
+
+          setProgress({ stage: 'converting', message: 'Video işleniyor...', progress: 70 });
+
+          // Blob'u base64'e çevir
+          const reader = new FileReader();
+          reader.onloadend = async function() {
+            const base64Data = reader.result;
+
+            setProgress({ stage: 'saving', message: 'Video kaydediliyor...', progress: 90 });
+
+            // Kaydet
+            await saveVideoToFile({
+              data: base64Data,
+              size: blob.size,
+              resolution: bestVideo.width + 'x' + bestVideo.height,
+              type: blob.type || 'video/mp4'
+            });
+          };
+          reader.readAsDataURL(blob);
+
+        } catch (error) {
+          console.error('❌ GraphQL download error:', error);
+          setLoading(false);
+          setLoadWebView(false);
+          Alert.alert('Hata', 'Video indirilemedi: ' + error.message);
+        }
+
         return;
       }
 
@@ -309,6 +450,10 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
       webViewRef.current.injectJavaScript(testScript);
       console.log('🧪 Test script injected');
 
+      // Fallback script'leri devre dışı bırakıldı - GraphQL capture yeterli
+      console.log('ℹ️ Fallback scripts disabled - using GraphQL only');
+
+      /*
       console.log('💉 Injecting fallback script...');
 
       // Önce script'in geldiğini kontrol et
@@ -316,7 +461,7 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
       console.log('📏 Script length:', script.length);
 
       // Basit inline script dene
-      const inlineScript = `
+      const inlineScript_DISABLED = `
         (function() {
           console.log('📍 INLINE SCRIPT WORKING!');
           window.ReactNativeWebView.postMessage(JSON.stringify({
@@ -513,10 +658,11 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
         true;
       `;
 
-      webViewRef.current.injectJavaScript(inlineScript);
-      console.log('✅ Inline script injected');
+      // webViewRef.current.injectJavaScript(inlineScript_DISABLED);
+      // console.log('✅ Inline script injected');
+      */
 
-      // Hemen popup'ları temizle
+      // Popup temizleme script'i - bu aktif kalabilir
       const cleanupScript = `
         (function() {
           console.log('🧹 Cleaning up popups...');
@@ -757,11 +903,15 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
 
   const saveVideoToFile = async (videoData) => {
     try {
+      // Post ID'yi URL'den çıkar
+      const postId = url.match(/\/(reel|p|tv)\/([^/?]+)/)?.[2] || 'unknown';
+
       // Video tipi WebM ise .webm, değilse .mp4
       const ext = videoData.type && videoData.type.includes('webm') ? 'webm' : 'mp4';
-      const fileName = `instagram_${videoData.resolution}_${Date.now()}.${ext}`;
+      const fileName = `instagram_${postId}_${videoData.resolution}_${Date.now()}.${ext}`;
 
       console.log('💾 Saving video:', fileName);
+      console.log('🆔 Post ID from URL:', postId);
 
       // data:video/webm;base64,... formatından base64 kısmını çıkar
       const base64Data = videoData.data.includes(',')
@@ -810,7 +960,7 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
         if (await Sharing.isAvailableAsync()) {
           Alert.alert(
             'Başarılı',
-            `Video indirildi!\n\nKalite: ${videoData.resolution}\nBoyut: ${(fileSizeBytes / 1024 / 1024).toFixed(2)} MB\nFormat: ${format}\n\n"Dosyalara Kaydet" seçeneğini kullanarak cihazınıza kaydedebilirsiniz.`,
+            `Video indirildi!\n\nVideo ID: ${postId}\nKalite: ${videoData.resolution}\nBoyut: ${(fileSizeBytes / 1024 / 1024).toFixed(2)} MB\nFormat: ${format}\n\n"Dosyalara Kaydet" seçeneğini kullanarak cihazınıza kaydedebilirsiniz.`,
             [
               {
                 text: 'Paylaş / Kaydet',
@@ -1006,9 +1156,9 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
           </View>
           <WebView
             ref={webViewRef}
-            source={{ uri: url }}
+            source={{ uri: url.replace(/\/(reel|p|tv)\/([^/?]+)/, '/p/$2/embed/captioned/') }}
             style={styles.miniWebView}
-            injectedJavaScriptBeforeContentLoaded={getInstagramGraphQLCaptureScript()}
+            injectedJavaScriptBeforeContentLoaded={getInstagramEmbedCaptureScript()}
             onMessage={handleWebViewMessage}
             onLoad={handleWebViewLoad}
             onLoadProgress={({ nativeEvent }) => setWebViewProgress(nativeEvent.progress * 100)}
@@ -1023,7 +1173,40 @@ export default function UrlInputScreen({ onVideoDownloaded, onBack }) {
                 console.log('⚠️ Important:', msg);
               }
             }}
+            onNavigationStateChange={(navState) => {
+              // URL değişikliklerini logla - yönlendirmeleri yakalayalım
+              console.log('🧭 Navigation:', navState.url);
+              console.log('🎯 Original URL:', url);
+
+              // Trailing slash farklarını görmezden gel
+              const normalizeUrl = (u) => u.replace(/\/$/, '');
+
+              if (normalizeUrl(navState.url) !== normalizeUrl(url)) {
+                console.log('⚠️ URL CHANGED! Original:', url);
+                console.log('⚠️ URL CHANGED! Current:', navState.url);
+
+                // Post ID'leri çıkar ve karşılaştır
+                const originalId = url.match(/\/(reel|p|tv)\/([^/?]+)/)?.[2];
+                const currentId = navState.url.match(/\/(reel|p|tv)\/([^/?]+)/)?.[2];
+
+                console.log('📍 Original Post ID:', originalId);
+                console.log('📍 Current Post ID:', currentId);
+
+                if (originalId && currentId && originalId !== currentId) {
+                  Alert.alert(
+                    '⚠️ Farklı Video!',
+                    `Girilen video ID: ${originalId}\n\nYüklenen video ID: ${currentId}\n\n❌ Instagram farklı bir içeriğe yönlendirdi!`,
+                    [
+                      { text: 'İptal Et', onPress: () => { setLoadWebView(false); setLoading(false); } },
+                      { text: 'Devam Et', style: 'cancel' }
+                    ]
+                  );
+                }
+              }
+            }}
             onShouldStartLoadWithRequest={(request) => {
+              console.log('📍 Loading:', request.url.substring(0, 80));
+
               // Instagram deep link ve app store yönlendirmelerini engelle
               if (request.url.startsWith('instagram://') ||
                   request.url.startsWith('itms-appss://') ||
