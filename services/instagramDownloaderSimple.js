@@ -6,7 +6,18 @@
 export function getSimpleInjectionScript() {
   return `
 (function() {
+  console.log('🚀 Simple Script IIFE Started');
+
   try {
+    console.log('🚀 Simple Script Try Block Entered');
+
+    if (typeof window.ReactNativeWebView === 'undefined') {
+      console.error('❌ ReactNativeWebView is undefined!');
+      return;
+    }
+
+    console.log('✅ ReactNativeWebView found');
+
     window.ReactNativeWebView.postMessage(JSON.stringify({
       type: 'DEBUG',
       message: '🚀 Simple Script Started'
@@ -73,11 +84,99 @@ export function getSimpleInjectionScript() {
           message: '▶️ Video oynatılıyor'
         }));
 
-        // Method 1: MediaRecorder ile video yakalama (blob için en iyi yöntem)
+        // Method 1: Blob URL'den direkt fetch (daha hızlı ve güvenilir)
         if (src && src.startsWith('blob:')) {
           window.ReactNativeWebView.postMessage(JSON.stringify({
             type: 'DEBUG',
-            message: '🎬 Blob video bulundu, MediaRecorder ile yakalanıyor...'
+            message: '🎬 Blob video bulundu, fetch ile alınıyor...'
+          }));
+
+          try {
+            // Blob URL'den direkt fetch et
+            fetch(src)
+              .then(response => response.blob())
+              .then(blob => {
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  type: 'DEBUG',
+                  message: '✅ Video fetch edildi: ' + (blob.size / 1024 / 1024).toFixed(2) + ' MB'
+                }));
+
+                // Base64'e çevir
+                const reader = new FileReader();
+                reader.onloadend = function() {
+                  videoExtracted = true;
+
+                  const base64Data = reader.result;
+                  const chunkSize = 2000000; // 2MB chunks
+                  const totalChunks = Math.ceil(base64Data.length / chunkSize);
+
+                  window.ReactNativeWebView.postMessage(JSON.stringify({
+                    type: 'DEBUG',
+                    message: '📤 Video ' + totalChunks + ' parçada gönderiliyor...'
+                  }));
+
+                  // BLOB_START mesajı
+                  window.ReactNativeWebView.postMessage(JSON.stringify({
+                    type: 'BLOB_START',
+                    totalChunks: totalChunks,
+                    size: blob.size,
+                    mimeType: blob.type || 'video/webm',
+                    resolution: video.videoWidth + 'x' + video.videoHeight
+                  }));
+
+                  // Chunk'ları gönder
+                  for (let i = 0; i < totalChunks; i++) {
+                    const chunk = base64Data.substring(i * chunkSize, (i + 1) * chunkSize);
+                    window.ReactNativeWebView.postMessage(JSON.stringify({
+                      type: 'BLOB_CHUNK',
+                      chunkIndex: i,
+                      totalChunks: totalChunks,
+                      data: chunk
+                    }));
+                  }
+
+                  // BLOB_END mesajı
+                  window.ReactNativeWebView.postMessage(JSON.stringify({
+                    type: 'BLOB_END',
+                    totalChunks: totalChunks
+                  }));
+
+                  window.ReactNativeWebView.postMessage(JSON.stringify({
+                    type: 'DEBUG',
+                    message: '✅ ' + totalChunks + ' parça gönderildi!'
+                  }));
+                };
+                reader.readAsDataURL(blob);
+              })
+              .catch(err => {
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  type: 'DEBUG',
+                  message: '⚠️ Fetch hatası: ' + err.message + ', MediaRecorder deneniyor...'
+                }));
+
+                // Fetch başarısız olursa MediaRecorder'a düş
+                tryMediaRecorder();
+              });
+
+            return;
+
+          } catch (err) {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'DEBUG',
+              message: '⚠️ Blob fetch hatası: ' + err.message
+            }));
+            // Hata olursa MediaRecorder dene
+            tryMediaRecorder();
+          }
+
+          return;
+        }
+
+        // Method 2: MediaRecorder ile video yakalama (fallback)
+        function tryMediaRecorder() {
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'DEBUG',
+            message: '🎬 MediaRecorder ile yakalanıyor...'
           }));
 
           try {
@@ -100,17 +199,17 @@ export function getSimpleInjectionScript() {
             });
 
             let totalRecorded = 0;
+            let chunkCount = 0;
             mediaRecorder.ondataavailable = function(e) {
               if (e.data && e.data.size > 0) {
                 chunks.push(e.data);
                 totalRecorded += e.data.size;
-                // Her 500KB'da bir log bas (çok fazla log olmasın)
-                if (totalRecorded % (500 * 1024) < 100 * 1024) {
-                  window.ReactNativeWebView.postMessage(JSON.stringify({
-                    type: 'DEBUG',
-                    message: '📦 Kaydediliyor: ' + (totalRecorded / 1024 / 1024).toFixed(2) + ' MB'
-                  }));
-                }
+                chunkCount++;
+
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  type: 'DEBUG',
+                  message: '📦 Chunk #' + chunkCount + ': ' + (e.data.size / 1024).toFixed(1) + ' KB (Toplam: ' + (totalRecorded / 1024 / 1024).toFixed(2) + ' MB)'
+                }));
               }
             };
 
@@ -140,7 +239,7 @@ export function getSimpleInjectionScript() {
                 videoExtracted = true;
 
                 const base64Data = reader.result;
-                const chunkSize = 500000; // 500KB parçalar halinde gönder
+                const chunkSize = 2000000; // 2MB parçalar halinde gönder (daha hızlı)
                 const totalChunks = Math.ceil(base64Data.length / chunkSize);
 
                 window.ReactNativeWebView.postMessage(JSON.stringify({
@@ -194,8 +293,8 @@ export function getSimpleInjectionScript() {
               }
             };
 
-            // Kayda başla
-            mediaRecorder.start(100); // Her 100ms'de chunk kaydet
+            // Kayda başla - Her 1 saniyede data iste
+            mediaRecorder.start(1000);
             recordingStarted = true;
 
             window.ReactNativeWebView.postMessage(JSON.stringify({
@@ -205,26 +304,79 @@ export function getSimpleInjectionScript() {
 
             // Video'nun süresini al
             const videoDuration = video.duration || 15; // Default 15 saniye
-            const recordTime = Math.min(videoDuration + 1, 60); // Maksimum 60 saniye
+            const recordTime = Math.min(videoDuration + 2, 30); // Maksimum 30 saniye (daha hızlı test)
 
             window.ReactNativeWebView.postMessage(JSON.stringify({
               type: 'DEBUG',
               message: '⏱️ Video süresi: ' + videoDuration.toFixed(1) + 's, ' + recordTime.toFixed(0) + ' saniye kaydedilecek'
             }));
 
-            // Video'yu baştan başlat
+            // Video'yu baştan başlat ve agresif oynat
             video.currentTime = 0;
-            video.loop = false; // Loop'u kapat
-            video.play();
+            video.loop = false;
+            video.muted = true;
+            video.volume = 0;
 
-            // Video süresi + 1 saniye sonra durdur
+            // Play'i birden fazla kere dene
+            const forcePlay = function() {
+              video.play().then(function() {
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  type: 'DEBUG',
+                  message: '▶️ Video oynatıldı! currentTime: ' + video.currentTime.toFixed(1) + ', paused: ' + video.paused
+                }));
+              }).catch(function(err) {
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  type: 'DEBUG',
+                  message: '⚠️ Video play hatası: ' + err.message
+                }));
+              });
+            };
+
+            forcePlay();
+            setTimeout(forcePlay, 500);
+            setTimeout(forcePlay, 1000);
+
+            // Her 3 saniyede bir kontrol et ve video duruyorsa tekrar oynat
+            const checkInterval = setInterval(function() {
+              if (mediaRecorder.state === 'recording') {
+                const isPaused = video.paused;
+                const currentTime = video.currentTime;
+
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  type: 'DEBUG',
+                  message: '⏰ Kayıt: ' + currentTime.toFixed(1) + 's / ' + videoDuration.toFixed(1) + 's | Paused: ' + isPaused + ' | State: ' + video.readyState
+                }));
+
+                // Video durmuşsa tekrar oynat
+                if (isPaused || currentTime === 0) {
+                  window.ReactNativeWebView.postMessage(JSON.stringify({
+                    type: 'DEBUG',
+                    message: '🔄 Video durmuş, yeniden oynatılıyor...'
+                  }));
+                  video.play();
+                }
+              }
+            }, 3000);
+
+            // Video süresi + 2 saniye sonra durdur
             setTimeout(function() {
+              clearInterval(checkInterval);
               if (!videoExtracted && mediaRecorder.state === 'recording') {
                 window.ReactNativeWebView.postMessage(JSON.stringify({
                   type: 'DEBUG',
                   message: '✅ Kayıt tamamlandı (' + recordTime.toFixed(0) + 's), işleniyor...'
                 }));
                 mediaRecorder.stop();
+              } else if (videoExtracted) {
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  type: 'DEBUG',
+                  message: '⚠️ Video zaten çıkarıldı, timeout atlandı'
+                }));
+              } else {
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  type: 'DEBUG',
+                  message: '⚠️ MediaRecorder state: ' + mediaRecorder.state
+                }));
               }
             }, recordTime * 1000);
 
@@ -238,7 +390,7 @@ export function getSimpleInjectionScript() {
           }
         }
 
-        // Method 2: Direkt .mp4 URL varsa kullan
+        // Method 3: Direkt .mp4 URL varsa kullan
         if (src && src.includes('.mp4')) {
           videoExtracted = true;
           window.ReactNativeWebView.postMessage(JSON.stringify({
@@ -262,9 +414,14 @@ export function getSimpleInjectionScript() {
       }
     }
 
-    // Her 2 saniyede bir dene (sadece kayıt başlayana kadar)
+    // Daha agresif kontrol - her 500ms
     let attempts = 0;
-    const maxAttempts = 15;
+    const maxAttempts = 30; // 15 saniye boyunca dene
+
+    window.ReactNativeWebView.postMessage(JSON.stringify({
+      type: 'DEBUG',
+      message: '🔄 Video arama başladı (her 500ms)'
+    }));
 
     const interval = setInterval(function() {
       attempts++;
@@ -272,6 +429,10 @@ export function getSimpleInjectionScript() {
       if (videoExtracted || recordingStarted) {
         // Video kaydı başladı, interval'i durdur
         clearInterval(interval);
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'DEBUG',
+          message: '✅ Video bulundu, arama durduruldu'
+        }));
         return;
       }
 
@@ -279,15 +440,15 @@ export function getSimpleInjectionScript() {
         clearInterval(interval);
         window.ReactNativeWebView.postMessage(JSON.stringify({
           type: 'ERROR',
-          message: 'Video bulunamadı (15 deneme)'
+          message: 'Video bulunamadı (' + maxAttempts + ' deneme)'
         }));
       } else {
         extractVideo();
       }
-    }, 2000);
+    }, 500);
 
-    // İlk deneme
-    setTimeout(extractVideo, 2000);
+    // İlk deneme hemen
+    setTimeout(extractVideo, 100);
 
   } catch (err) {
     window.ReactNativeWebView.postMessage(JSON.stringify({
